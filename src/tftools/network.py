@@ -239,6 +239,12 @@ class Network(object):
             return output
 
     @layer
+    def embedding(self, input, name, vocab_size, embedding_size):
+        with tf.variable_scope(name) as scope:
+            embedding_matrix = self.make_var('embedding', shape=[vocab_size, embedding_size])
+            return tf.nn.embedding_lookup(embedding_matrix, input)
+
+    @layer
     def dropout(self, input, keep_prob, name):
         keep = 1 - self.use_dropout + (self.use_dropout * keep_prob)
         return tf.nn.dropout(input, keep, name=name)
