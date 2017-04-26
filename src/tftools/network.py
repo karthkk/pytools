@@ -149,6 +149,11 @@ class Network(object):
         return tf.nn.relu(input, name=name)
 
     @layer
+    def sigmoid(self, input, name):
+        return tf.nn.sigmoid(input, name=name)
+
+
+    @layer
     def max_pool(self, input, k_h, k_w, s_h, s_w, name, padding=DEFAULT_PADDING):
         self.validate_padding(padding)
         return tf.nn.max_pool(input,
@@ -177,7 +182,7 @@ class Network(object):
 
     @layer
     def concat(self, inputs, axis, name):
-        return tf.concat(concat_dim=axis, values=inputs, name=name)
+        return tf.concat(axis=axis, values=inputs, name=name)
 
     @layer
     def add(self, inputs, name):
