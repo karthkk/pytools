@@ -57,6 +57,9 @@ class Network(object):
         ignore_missing: If true, serialized weights for missing layers are ignored.
         '''
         data_dict = np.load(data_path).item()
+        self.load_from_dict(data_dict, ignore_missing, session)
+
+    def load_from_dict(self, data_dict, ignore_missing, session):
         for op_name in data_dict:
             with tf.variable_scope(op_name, reuse=True):
                 for param_name, data in data_dict[op_name].iteritems():
@@ -93,9 +96,11 @@ class Network(object):
         ident = sum(t.startswith(prefix) for t, _ in self.layers.items()) + 1
         return '%s_%d' % (prefix, ident)
 
-    def make_var(self, name, shape):
+    def make_var(self, name, shape, trainable=None):
         '''Creates a new TensorFlow variable.'''
-        return tf.get_variable(name, shape, trainable=self.trainable)
+        if trainable is None:
+            trainable = self.trainable
+        return tf.get_variable(name, shape, trainable=trainable)
 
     def validate_padding(self, padding):
         '''Verifies that the padding is one of the supported ones.'''
@@ -113,7 +118,8 @@ class Network(object):
              relu=True,
              padding=DEFAULT_PADDING,
              group=1,
-             biased=True):
+             biased=True,
+             trainable=None, reuse=False):
         # Verify that the padding is acceptable
         self.validate_padding(padding)
         # Get the number of channels in the input
@@ -123,8 +129,8 @@ class Network(object):
         assert c_o % group == 0
         # Convolution for a given input and kernel
         convolve = lambda i, k: tf.nn.conv2d(i, k, [1, s_h, s_w, 1], padding=padding)
-        with tf.variable_scope(name) as scope:
-            kernel = self.make_var('weights', shape=[k_h, k_w, c_i / group, c_o])
+        with tf.variable_scope(name, reuse=reuse) as scope:
+            kernel = self.make_var('weights', shape=[k_h, k_w, c_i / group, c_o], trainable=trainable)
             if group == 1:
                 # This is the common-case. Convolve the input without any further complications.
                 output = convolve(input, kernel)
@@ -137,7 +143,7 @@ class Network(object):
                 output = tf.concat(3, output_groups)
             # Add the biases
             if biased:
-                biases = self.make_var('biases', [c_o])
+                biases = self.make_var('biases', [c_o], trainable=trainable)
                 output = tf.nn.bias_add(output, biases)
             if relu:
                 # ReLU non-linearity
@@ -162,6 +168,11 @@ class Network(object):
                               padding=padding,
                               name=name)
 
+
+    @layer
+    def sigmoid(self, input, name):
+        return tf.nn.sigmoid(input, name)
+
     @layer
     def avg_pool(self, input, k_h, k_w, s_h, s_w, name, padding=DEFAULT_PADDING):
         self.validate_padding(padding)
@@ -182,15 +193,15 @@ class Network(object):
 
     @layer
     def concat(self, inputs, axis, name):
-        return tf.concat(axis=axis, values=inputs, name=name)
+        return tf.concat( values=inputs, axis =axis, name=name)
 
     @layer
     def add(self, inputs, name):
         return tf.add_n(inputs, name=name)
 
     @layer
-    def fc(self, input, num_out, name, relu=True):
-        with tf.variable_scope(name) as scope:
+    def fc(self, input, num_out, name, relu=True, trainable=None, reuse=False):
+        with tf.variable_scope(name, reuse=reuse) as scope:
             input_shape = input.get_shape()
             if input_shape.ndims == 4:
                 # The input is spatial. Vectorize it first.
@@ -200,8 +211,8 @@ class Network(object):
                 feed_in = tf.reshape(input, [-1, dim])
             else:
                 feed_in, dim = (input, input_shape[-1].value)
-            weights = self.make_var('weights', shape=[dim, num_out])
-            biases = self.make_var('biases', [num_out])
+            weights = self.make_var('weights', shape=[dim, num_out], trainable=trainable)
+            biases = self.make_var('biases', [num_out], trainable=trainable)
             op = tf.nn.relu_layer if relu else tf.nn.xw_plus_b
             fc = op(feed_in, weights, biases, name=scope.name)
             return fc
@@ -217,22 +228,22 @@ class Network(object):
                 input = tf.squeeze(input, squeeze_dims=[1, 2])
             else:
                 raise ValueError('Rank 2 tensor input expected for softmax!')
-        return tf.nn.softmax(input, name)
+        return tf.nn.softmax(input, name=name)
 
     @layer
-    def batch_normalization(self, input, name, scale_offset=True, relu=False):
+    def batch_normalization(self, input, name, scale_offset=True, relu=False, trainable=None, reuse=False):
         # NOTE: Currently, only inference is supported
-        with tf.variable_scope(name) as scope:
+        with tf.variable_scope(name, reuse=reuse) as scope:
             shape = [input.get_shape()[-1]]
             if scale_offset:
-                scale = self.make_var('scale', shape=shape)
-                offset = self.make_var('offset', shape=shape)
+                scale = self.make_var('scale', shape=shape, trainable=trainable)
+                offset = self.make_var('offset', shape=shape, trainable=trainable)
             else:
                 scale, offset = (None, None)
             output = tf.nn.batch_normalization(
                 input,
-                mean=self.make_var('mean', shape=shape),
-                variance=self.make_var('variance', shape=shape),
+                mean=self.make_var('mean', shape=shape), trainable=trainable,
+                variance=self.make_var('variance', shape=shape, trainable=trainable),
                 offset=offset,
                 scale=scale,
                 # TODO: This is the default Caffe batch norm eps
@@ -257,3 +268,14 @@ class Network(object):
     @layer
     def tanh(self, input, name):
         return tf.nn.tanh(input, name=name)
+
+    def load_with_transformation(self, model, transforms):
+        out = {}
+        for key in model.keys():
+            v = model[key]
+            for transform in transforms:
+                out_ky = transform(key)
+                if out_ky not in out:
+                    out[out_ky] = v
+        return out
+
