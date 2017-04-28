@@ -269,6 +269,39 @@ class Network(object):
     def tanh(self, input, name):
         return tf.nn.tanh(input, name=name)
 
+
+    @layer
+    def spatial_softmax(input, name):
+        """Spatial Softmax on convolutions. Produces x,y coordinates of expected activation of each filter.
+        Assumes NWHC format"""
+        batch_size, num_rows, num_cols, num_channels = [d.value for d in input.shape]
+        if batch_size is None:
+            batch_size = -1
+
+        x_map = np.empty([num_rows, num_cols], np.float32)
+        y_map = np.empty([num_rows, num_cols], np.float32)
+
+        for i in range(num_rows):
+            for j in range(num_cols):
+                x_map[i, j] = (i - num_rows / 2.0) / num_rows
+                y_map[i, j] = (j - num_cols / 2.0) / num_cols
+
+        x_map = tf.convert_to_tensor(x_map)
+        y_map = tf.convert_to_tensor(y_map)
+
+        x_map = tf.reshape(x_map, [num_rows * num_cols])
+        y_map = tf.reshape(y_map, [num_rows * num_cols])
+
+        features = tf.reshape(tf.transpose(input, [0, 3, 1, 2]),
+                              [batch_size, num_channels, num_rows * num_cols])
+        softmax = tf.nn.softmax(features)
+
+        fp_x = tf.reduce_sum(tf.multiply(x_map, softmax), 2)
+        fp_y = tf.reduce_sum(tf.multiply(y_map, softmax), 2)
+
+        fp = tf.reshape(tf.concat(axis=1, values=[fp_x, fp_y]), [batch_size, num_channels * 2], name=name)
+        return fp
+
     def load_with_transformation(self, model, transforms):
         out = {}
         for key in model.keys():
