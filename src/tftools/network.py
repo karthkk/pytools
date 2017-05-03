@@ -302,6 +302,21 @@ class Network(object):
         fp = tf.reshape(tf.concat(axis=1, values=[fp_x, fp_y]), [batch_size, num_channels * 2], name=name)
         return fp
 
+    @layer
+    def depth_lookup(self, (input, depth_im), name):
+        """ lookup from a depth image the location of the features of the features  """
+        batch_size, num_rows, num_cols, num_channels = [d.value for d in input.shape]
+        if batch_size is None:
+            batch_size = -1
+
+        features = tf.reshape(tf.transpose(input, [0, 3, 1, 2]),
+                              [batch_size, num_channels, num_rows * num_cols])
+        softmax = tf.nn.softmax(features)
+        softmax_T = tf.transpose(softmax, [1,0,2]) ## Since softmax is batch, filter, num_row*num_col and depth is batch, num_row*num_col.. Move filter aside for a valid elementwise multiplication
+        prod = tf.multiply(softmax_T, depth_im)
+        prod_T = tf.transpose(prod, [1,0,2])
+        return tf.reduce_sum(prod_T, axis=-1, name=name)
+
     def load_with_transformation(self, model, transforms):
         out = {}
         for key in model.keys():
