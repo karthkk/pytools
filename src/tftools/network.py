@@ -106,6 +106,37 @@ class Network(object):
         '''Verifies that the padding is one of the supported ones.'''
         assert padding in ('SAME', 'VALID')
 
+
+    @layer
+    def deconv(self,
+               input,
+               output_shape,
+               k_h,
+               k_w,
+               s_h,
+               s_w,
+               name,
+               relu=True,
+               biased=True,
+               trainable=True,
+               reuse=False):
+
+        with tf.variable_scope(name, reuse=reuse) as scope:
+            kernel = self.make_var('weights', shape=[k_h, k_w, output_shape[-1],input.get_shape()[-1]], trainable=trainable)
+
+            output = tf.nn.conv2d_transpose(input, kernel, output_shape=output_shape,
+                                        strides=[1, s_h, s_w, 1])
+
+            if biased:
+                biases = self.make_var('biases', [output_shape[-1]], trainable=trainable)
+                output = tf.nn.bias_add(output, biases)
+            if relu:
+                # ReLU non-linearity
+                output = tf.nn.relu(output, name=scope.name)
+         
+        return output
+
+
     @layer
     def conv(self,
              input,
@@ -130,17 +161,16 @@ class Network(object):
         # Convolution for a given input and kernel
         convolve = lambda i, k: tf.nn.conv2d(i, k, [1, s_h, s_w, 1], padding=padding)
         with tf.variable_scope(name, reuse=reuse) as scope:
-            kernel = self.make_var('weights', shape=[k_h, k_w, c_i / group, c_o], trainable=trainable)
+            kernel = self.make_var('weights', shape=[k_h, k_w, c_i / group, c_o / group], trainable=trainable)
             if group == 1:
                 # This is the common-case. Convolve the input without any further complications.
                 output = convolve(input, kernel)
             else:
                 # Split the input into groups and then convolve each of them independently
-                input_groups = tf.split(3, group, input)
-                kernel_groups = tf.split(3, group, kernel)
-                output_groups = [convolve(i, k) for i, k in zip(input_groups, kernel_groups)]
+                input_groups = tf.split(input, group, axis=np.int32(3))
+                output_groups = [convolve(i, kernel) for i in input_groups]
                 # Concatenate the groups
-                output = tf.concat(3, output_groups)
+                output = tf.concat(values=output_groups, axis=3)
             # Add the biases
             if biased:
                 biases = self.make_var('biases', [c_o], trainable=trainable)
@@ -269,6 +299,10 @@ class Network(object):
     def tanh(self, input, name):
         return tf.nn.tanh(input, name=name)
 
+    @layer
+    def reshape(self, input, shape, name):
+        return tf.reshape(input, shape=shape, name=name)
+
 
     @layer
     def spatial_softmax(self, input, name):
@@ -326,4 +360,22 @@ class Network(object):
                 if out_ky not in out:
                     out[out_ky] = v
         return out
-
+   
+    
+    #TODO:  support for files with > 2 level deep variables
+    def export(self, sess, file_name):
+        s = []
+        for layer in self.layers:
+            s+=([ (layer, v) for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES) if v.name.startswith(layer) ])
+        outdict = {}
+        for layer, var in s:
+            varname = var.name.replace(':0', '')
+            varvalue = var.eval(sess)
+            if ('/' in varname) and (len(varname) == 2):
+                (base, det) = varname.split('/')
+                indict = outdict.get(base, {})
+                indict[det] = varvalue
+                outdict[base] = indict
+            else:
+                outdict[varname] = varvalue
+        np.save(file_name, outdict)
