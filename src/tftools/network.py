@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow as tf
+import tensorflow.contrib.slim as slim
 
 DEFAULT_PADDING = 'SAME'
 
@@ -31,7 +32,7 @@ def layer(op):
 
 class Network(object):
 
-    def __init__(self, inputs, trainable=True):
+    def __init__(self, inputs, trainable=True, initializer = None):
         # The input nodes for this network
         self.inputs = inputs
         # The current list of terminal nodes
@@ -44,6 +45,9 @@ class Network(object):
         self.use_dropout = tf.placeholder_with_default(tf.constant(1.0),
                                                        shape=[],
                                                        name='use_dropout')
+        if initializer is None:
+            self.initializer =  tf.contrib.layers.xavier_initializer(uniform=True, seed=None, dtype=tf.float32)
+        self.vars = []
         self.setup()
 
     def setup(self):
@@ -96,45 +100,28 @@ class Network(object):
         ident = sum(t.startswith(prefix) for t, _ in self.layers.items()) + 1
         return '%s_%d' % (prefix, ident)
 
-    def make_var(self, name, shape, trainable=None):
+    def make_var(self, name, shape, trainable=None, initializer=None):
         '''Creates a new TensorFlow variable.'''
         if trainable is None:
             trainable = self.trainable
-        return tf.get_variable(name, shape, trainable=trainable)
+        if initializer is None:
+            initializer = self.initializer
+        var = tf.get_variable(name, shape, trainable=trainable, initializer=initializer)
+        self.vars.append(var)
+        return var
 
     def validate_padding(self, padding):
         '''Verifies that the padding is one of the supported ones.'''
         assert padding in ('SAME', 'VALID')
-
+        
 
     @layer
-    def deconv(self,
-               input,
-               output_shape,
-               k_h,
-               k_w,
-               s_h,
-               s_w,
-               name,
-               relu=True,
-               biased=True,
-               trainable=True,
-               reuse=False):
-
-        with tf.variable_scope(name, reuse=reuse) as scope:
-            kernel = self.make_var('weights', shape=[k_h, k_w, output_shape[-1],input.get_shape()[-1]], trainable=trainable)
-
-            output = tf.nn.conv2d_transpose(input, kernel, output_shape=output_shape,
-                                        strides=[1, s_h, s_w, 1])
-
-            if biased:
-                biases = self.make_var('biases', [output_shape[-1]], trainable=trainable)
-                output = tf.nn.bias_add(output, biases)
-            if relu:
-                # ReLU non-linearity
-                output = tf.nn.relu(output, name=scope.name)
-         
-        return output
+    def deconv(self, input, output_dim, name, ks=4, s=2, reuse=False):
+        with tf.variable_scope(name):
+            out =  slim.conv2d_transpose(input, output_dim, ks, s, padding='SAME', activation_fn=None, weights_initializer=self.initializer, biases_initializer=None)
+            deconv_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
+            self.vars+=deconv_vars
+            return out
 
 
     @layer
@@ -272,7 +259,7 @@ class Network(object):
                 scale, offset = (None, None)
             output = tf.nn.batch_normalization(
                 input,
-                mean=self.make_var('mean', shape=shape), trainable=trainable,
+                mean=self.make_var('mean', shape=shape, trainable=trainable),
                 variance=self.make_var('variance', shape=shape, trainable=trainable),
                 offset=offset,
                 scale=scale,
@@ -280,6 +267,21 @@ class Network(object):
                 # Get the actual eps from parameters
                 variance_epsilon=1e-5,
                 name=name)
+            if relu:
+                output = tf.nn.relu(output)
+            return output
+        
+    @layer
+    def instance_norm(self, input, name, relu=False, trainable=None, reuse=False):
+        with tf.variable_scope(name, reuse=reuse) as scope:
+            depth = input.get_shape()[-1]
+            scale = self.make_var("scale", [depth], initializer=tf.random_normal_initializer(1.0, 0.02, dtype=tf.float32), trainable=trainable)
+            offset = self.make_var("offset", [depth], initializer=tf.constant_initializer(0.0), trainable=trainable)
+            mean, variance = tf.nn.moments(input, axes=[1,2], keep_dims=True)
+            epsilon = 1e-5
+            inv = tf.rsqrt(variance + epsilon)
+            normalized = (input-mean)*inv
+            output = scale*normalized + offset
             if relu:
                 output = tf.nn.relu(output)
             return output
@@ -361,7 +363,10 @@ class Network(object):
                     out[out_ky] = v
         return out
    
-    
+   
+    def get_vars(self):
+        return self.vars
+ 
     #TODO:  support for files with > 2 level deep variables
     def export(self, sess, file_name):
         s = []

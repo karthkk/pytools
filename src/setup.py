@@ -8,5 +8,5 @@ setup(name='pytools',
       author="Karthik",
       author_email='karthikkumara@outlook.com',
       url='https://github.com/karthkk/pytools',
-      packages=['tftools'],
+      packages=['tftools', 'imgtools'],
      )

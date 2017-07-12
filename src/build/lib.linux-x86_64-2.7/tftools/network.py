@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow as tf
+import tensorflow.contrib.slim as slim
 
 DEFAULT_PADDING = 'SAME'
 
@@ -31,7 +32,7 @@ def layer(op):
 
 class Network(object):
 
-    def __init__(self, inputs, trainable=True):
+    def __init__(self, inputs, trainable=True, initializer = None):
         # The input nodes for this network
         self.inputs = inputs
         # The current list of terminal nodes
@@ -44,6 +45,9 @@ class Network(object):
         self.use_dropout = tf.placeholder_with_default(tf.constant(1.0),
                                                        shape=[],
                                                        name='use_dropout')
+        if initializer is None:
+            self.initializer =  tf.contrib.layers.xavier_initializer(uniform=True, seed=None, dtype=tf.float32)
+        self.vars = []
         self.setup()
 
     def setup(self):
@@ -96,15 +100,57 @@ class Network(object):
         ident = sum(t.startswith(prefix) for t, _ in self.layers.items()) + 1
         return '%s_%d' % (prefix, ident)
 
-    def make_var(self, name, shape, trainable=None):
+    def make_var(self, name, shape, trainable=None, initializer=None):
         '''Creates a new TensorFlow variable.'''
         if trainable is None:
             trainable = self.trainable
-        return tf.get_variable(name, shape, trainable=trainable)
+        if initializer is None:
+            initializer = self.initializer
+        var = tf.get_variable(name, shape, trainable=trainable, initializer=initializer)
+        self.vars.append(var)
+        return var
 
     def validate_padding(self, padding):
         '''Verifies that the padding is one of the supported ones.'''
         assert padding in ('SAME', 'VALID')
+        
+
+#    @layer
+#    def deconv(self, input, output_dim, name, ks=4, s=2, reuse=False):
+#        with tf.variable_scope(name):
+##            return slim.conv2d_transpose(input, output_dim, ks, s, padding='SAME', activation_fn=None,
+#                                   weights_initializer=self.initializer,
+#                                  biases_initializer=None)
+
+    @layer
+    def deconv(self,
+               input,
+               output_shape,
+               k_h,
+               k_w,
+               s_h,
+               s_w,
+               name,
+               relu=True,
+               biased=True,
+               trainable=True,
+               reuse=False):
+
+        with tf.variable_scope(name, reuse=reuse) as scope:
+            kernel = self.make_var('weights', shape=[k_h, k_w, output_shape[-1],input.get_shape()[-1]], trainable=trainable)
+
+            output = tf.nn.conv2d_transpose(input, kernel, output_shape=output_shape,
+                                        strides=[1, s_h, s_w, 1])
+
+            if biased:
+                biases = self.make_var('biases', [output_shape[-1]], trainable=trainable)
+                output = tf.nn.bias_add(output, biases)
+            if relu:
+                # ReLU non-linearity
+                output = tf.nn.relu(output, name=scope.name)
+         
+        return output
+
 
     @layer
     def conv(self,
@@ -130,17 +176,16 @@ class Network(object):
         # Convolution for a given input and kernel
         convolve = lambda i, k: tf.nn.conv2d(i, k, [1, s_h, s_w, 1], padding=padding)
         with tf.variable_scope(name, reuse=reuse) as scope:
-            kernel = self.make_var('weights', shape=[k_h, k_w, c_i / group, c_o], trainable=trainable)
+            kernel = self.make_var('weights', shape=[k_h, k_w, c_i / group, c_o / group], trainable=trainable)
             if group == 1:
                 # This is the common-case. Convolve the input without any further complications.
                 output = convolve(input, kernel)
             else:
                 # Split the input into groups and then convolve each of them independently
-                input_groups = tf.split(3, group, input)
-                kernel_groups = tf.split(3, group, kernel)
-                output_groups = [convolve(i, k) for i, k in zip(input_groups, kernel_groups)]
+                input_groups = tf.split(input, group, axis=np.int32(3))
+                output_groups = [convolve(i, kernel) for i in input_groups]
                 # Concatenate the groups
-                output = tf.concat(3, output_groups)
+                output = tf.concat(values=output_groups, axis=3)
             # Add the biases
             if biased:
                 biases = self.make_var('biases', [c_o], trainable=trainable)
@@ -242,7 +287,7 @@ class Network(object):
                 scale, offset = (None, None)
             output = tf.nn.batch_normalization(
                 input,
-                mean=self.make_var('mean', shape=shape), trainable=trainable,
+                mean=self.make_var('mean', shape=shape, trainable=trainable),
                 variance=self.make_var('variance', shape=shape, trainable=trainable),
                 offset=offset,
                 scale=scale,
@@ -250,6 +295,21 @@ class Network(object):
                 # Get the actual eps from parameters
                 variance_epsilon=1e-5,
                 name=name)
+            if relu:
+                output = tf.nn.relu(output)
+            return output
+        
+    @layer
+    def instance_norm(self, input, name, relu=False, trainable=None, reuse=False):
+        with tf.variable_scope(name, reuse=reuse) as scope:
+            depth = input.get_shape()[-1]
+            scale = self.make_var("scale", [depth], initializer=tf.random_normal_initializer(1.0, 0.02, dtype=tf.float32), trainable=trainable)
+            offset = self.make_var("offset", [depth], initializer=tf.constant_initializer(0.0), trainable=trainable)
+            mean, variance = tf.nn.moments(input, axes=[1,2], keep_dims=True)
+            epsilon = 1e-5
+            inv = tf.rsqrt(variance + epsilon)
+            normalized = (input-mean)*inv
+            output = scale*normalized + offset
             if relu:
                 output = tf.nn.relu(output)
             return output
@@ -268,6 +328,10 @@ class Network(object):
     @layer
     def tanh(self, input, name):
         return tf.nn.tanh(input, name=name)
+
+    @layer
+    def reshape(self, input, shape, name):
+        return tf.reshape(input, shape=shape, name=name)
 
 
     @layer
@@ -302,6 +366,21 @@ class Network(object):
         fp = tf.reshape(tf.concat(axis=1, values=[fp_x, fp_y]), [batch_size, num_channels * 2], name=name)
         return fp
 
+    @layer
+    def depth_lookup(self, (input, depth_im), name):
+        """ lookup from a depth image the location of the features of the features  """
+        batch_size, num_rows, num_cols, num_channels = [d.value for d in input.shape]
+        if batch_size is None:
+            batch_size = -1
+
+        features = tf.reshape(tf.transpose(input, [0, 3, 1, 2]),
+                              [batch_size, num_channels, num_rows * num_cols])
+        softmax = tf.nn.softmax(features)
+        softmax_T = tf.transpose(softmax, [1,0,2]) ## Since softmax is batch, filter, num_row*num_col and depth is batch, num_row*num_col.. Move filter aside for a valid elementwise multiplication
+        prod = tf.multiply(softmax_T, depth_im)
+        prod_T = tf.transpose(prod, [1,0,2])
+        return tf.reduce_sum(prod_T, axis=-1, name=name)
+
     def load_with_transformation(self, model, transforms):
         out = {}
         for key in model.keys():
@@ -311,4 +390,25 @@ class Network(object):
                 if out_ky not in out:
                     out[out_ky] = v
         return out
-
+   
+   
+    def get_vars(self):
+        return self.vars
+ 
+    #TODO:  support for files with > 2 level deep variables
+    def export(self, sess, file_name):
+        s = []
+        for layer in self.layers:
+            s+=([ (layer, v) for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES) if v.name.startswith(layer) ])
+        outdict = {}
+        for layer, var in s:
+            varname = var.name.replace(':0', '')
+            varvalue = var.eval(sess)
+            if ('/' in varname) and (len(varname) == 2):
+                (base, det) = varname.split('/')
+                indict = outdict.get(base, {})
+                indict[det] = varvalue
+                outdict[base] = indict
+            else:
+                outdict[varname] = varvalue
+        np.save(file_name, outdict)

@@ -7,6 +7,7 @@ IMG_TYP = 'IMG'
 INT_TYP = "INT"
 FLT_TYP = "FLT"
 STR_TYP = "STR"
+NPY_TYP = "NPY"
 
 def _int64_feature(value):
     return tf.train.Feature(int64_list=tf.train.Int64List(value=value))
@@ -23,11 +24,19 @@ def read_img(feature, key):
     arr = np.fromstring(image_str,dtype=np.uint8).reshape((image_sz[0], image_sz[1], image_sz[2]))
     return arr
 
+def read_npy(feature, key):
+    arr_str = feature[key].bytes_list.value[0]
+    arr_sz = read_int_arr(feature, key + '_sz')
+    arr_dtype = read_str(feature, key+ '_typ')
+    arr = np.fromstring(arr_str,dtype=np.dtype(arr_dtype)).reshape(tuple(i for i in arr_sz))
+    return arr
+
+
 def read_int_arr(feature, key):
-    return feature[key].int64_list.value
+    return [v for v in feature[key].int64_list.value]
 
 def read_float_arr(feature, key):
-    return feature[key].float_list.value
+    return [v for v in feature[key].float_list.value]
 
 def read_str(feature, key):
     return feature[key].bytes_list.value[0]
@@ -46,8 +55,17 @@ def add_img(dct, ky, val):
     img_sz = val.shape
     add_int_arr(dct, ky + '_sz', img_sz)
 
-reader_lookup_by_type = {INT_TYP: read_int_arr, FLT_TYP: read_float_arr, IMG_TYP: read_img, STR_TYP: read_str}
-writer_lookup_by_type = {INT_TYP: add_int_arr, FLT_TYP: add_float_arr, IMG_TYP: add_img, STR_TYP: add_str}
+def add_npy(dct, ky, val):
+    dct[ky] = _bytes_feature(val.tostring())
+    arr_sz = val.shape
+    add_int_arr(dct, ky + '_sz', arr_sz)
+    arr_dtype = str(val.dtype)
+    add_str(dct, ky+'_typ', arr_dtype)
+
+
+
+reader_lookup_by_type = {INT_TYP: read_int_arr, FLT_TYP: read_float_arr, IMG_TYP: read_img, STR_TYP: read_str, NPY_TYP: read_npy}
+writer_lookup_by_type = {INT_TYP: add_int_arr, FLT_TYP: add_float_arr, IMG_TYP: add_img, STR_TYP: add_str, NPY_TYP: add_npy}
 
 class TFDataReader():
 
@@ -99,12 +117,13 @@ if __name__ == "__main__":
     img = np.zeros((20,20,3), dtype=np.uint8)
     inta = [1,2,3]
     flta = [2., 1., 5.]
+    nparr = np.array([[1., 2, 3], [4, 5, 6]], dtype=np.float32)
     tstr = 'test a'
     writer = TFDataWriter('/tmp/test')
-    writer.add([ ( 'a', img, IMG_TYP), ('b', flta, FLT_TYP), ('c', inta, INT_TYP), ('d', tstr, STR_TYP)])
+    writer.add([ ( 'a', img, IMG_TYP), ('b', flta, FLT_TYP), ('c', inta, INT_TYP), ('d', tstr, STR_TYP), ('e', nparr, NPY_TYP)])
     writer.close()
     reader = TFDataReader('/tmp/test')
-    dat = reader.read([('a', IMG_TYP), ('b', FLT_TYP), ('c', INT_TYP), ('d', STR_TYP)])
+    dat = reader.readall([('a', IMG_TYP), ('b', FLT_TYP), ('c', INT_TYP), ('d', STR_TYP), ('e', NPY_TYP)])[0]
     assert(dat['a'].shape == (20,20,3))
     (v1, v2, v3) = dat['b']
     assert (v1 == 2.)
@@ -115,6 +134,8 @@ if __name__ == "__main__":
     assert (v2 == 2)
     assert (v3 == 3)
     assert(dat['d'] == 'test a')
+    assert  (dat['e'][1,1] == 5)
+    assert (dat['e'].dtype == np.float32)
 
 
 
