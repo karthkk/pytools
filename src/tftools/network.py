@@ -125,6 +125,23 @@ class Network(object):
 
 
     @layer
+    def conv2d_slim(self, input, output_dim, ks=4, s=2, stddev=0.02, padding='SAME', name="conv2d",
+                    reuse=False, biased=False, relu=True):
+        with tf.variable_scope(name, reuse=reuse) as scope:
+            bias_init = None
+            if biased:
+                tf.truncated_normal_initializer(stddev=stddev)
+            out = slim.conv2d(input, output_dim, ks, s, padding=padding, activation_fn=None,
+                               weights_initializer=tf.truncated_normal_initializer(stddev=stddev),
+                               biases_initializer=bias_init)
+            conv_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
+            self.vars += conv_vars
+            if relu:
+                # ReLU non-linearity
+                out = tf.nn.relu(out, name=scope.name)
+            return out
+
+    @layer
     def conv(self,
              input,
              k_h,
@@ -170,6 +187,11 @@ class Network(object):
     @layer
     def relu(self, input, name):
         return tf.nn.relu(input, name=name)
+
+    @layer
+    def lrelu(self, input, name, leak=0.2):
+        return tf.maximum(input, leak * input, name=name)
+
 
     @layer
     def sigmoid(self, input, name):
@@ -291,6 +313,13 @@ class Network(object):
         with tf.variable_scope(name) as scope:
             embedding_matrix = self.make_var('embedding', shape=[vocab_size, embedding_size])
             return tf.nn.embedding_lookup(embedding_matrix, input)
+        
+    @layer
+    def selu(self, input, name):
+        with tf.variable_scope(name) as scope:
+            alpha = 1.6732632423543772848170429916717
+            scale = 1.0507009873554804934193349852946
+            return scale*tf.where(input>=0.0, input, alpha*tf.nn.elu(input))
 
     @layer
     def dropout(self, input, keep_prob, name):
